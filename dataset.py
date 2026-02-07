@@ -15,35 +15,28 @@ class PhysicalOpticTransform:
         self.max_photons = max_photons
 
     def __call__(self, img_tensor):
-        """
-        Args:
-            img_tensor (Tensor): Input image tensor (C, H, W) in range [0, 1].
-        Returns:
-            Tensor: Noisy image tensor (C, H, W) in range [0, 1].
-        """
-        # Convert to numpy (C, H, W) -> (H, W, C) for consistent processing with ISP logic
         img_np = img_tensor.permute(1, 2, 0).numpy()
         
-        # 1. Inverse Gamma Correction (Simulate linear light intensity)
+        # 1. 逆Gamma (线性光强)
         img_linear = np.power(img_np, self.gamma)
         
-        # 2. Poisson Noise Injection
-        expected_photons = img_linear * self.max_photons
-        # Poisson sampling (simulating discrete photon arrival)
-        noisy_photons = np.random.poisson(np.maximum(expected_photons, 0))
+        # 2. [关键修改] 先应用光谱响应，再计算光子/电子数
+        # 物理意义：Responsivity决定了能产生多少有效光电子
+        if img_linear.shape[2] == 3:
+            responsivity = np.array(config.RGB_RESPONSIVITY)
+            # 广播乘法: (H,W,3) * (3,)
+            img_effective = img_linear * responsivity
+        else:
+            img_effective = img_linear
+
+        # 3. 泊松噪声注入 (基于有效光电子数)
+        expected_electrons = img_effective * self.max_photons
+        noisy_electrons = np.random.poisson(np.maximum(expected_electrons, 0))
         
-        # 3. Normalize back to signal range
-        physical_signal = noisy_photons / self.max_photons
+        # 4. 归一化 (注意：分母依然是 max_photons，保留了Responsivity带来的变暗效果)
+        physical_signal = noisy_electrons / self.max_photons
         physical_signal = np.clip(physical_signal, 0, 1.0)
         
-        # 4. Spectral Responsivity Simulation
-        # Multiply each channel by its responsivity coefficient
-        # physical_signal shape is (H, W, C) where C=3 (RGB)
-        if physical_signal.shape[2] == 3:
-            responsivity = np.array(config.RGB_RESPONSIVITY)
-            physical_signal = physical_signal * responsivity
-        
-        # Convert back to Tensor (C, H, W)
         return torch.from_numpy(physical_signal).permute(2, 0, 1).float()
 
 def get_transforms(train=True):

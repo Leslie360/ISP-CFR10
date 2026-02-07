@@ -14,75 +14,53 @@ import numpy as np
 # ==========================================
 def apply_ltp_ltd_nonlinearity(net):
     """
-    Simulate Data-Driven LTP/LTD Non-linearity.
-    Modifies gradients based on the slope of real experimental data.
+    仅对 OrganicSynapseConv 层应用基于物理数据的非线性梯度缩放
     """
-    # Load polynomial coefficients from config
-    # P(w) returns the expected delta_w per pulse
-    ltp_poly = np.poly1d(config.LTP_POLY)
-    ltd_poly = np.poly1d(config.LTD_POLY)
+    # 预先加载系数到 Tensor (避免在循环中重复转换)
+    # 假设模型在 GPU，这里创建个 buffer 或者在循环里处理
+    # 简单起见，在循环里判断 device
     
-    for name, param in net.named_parameters():
-        if param.grad is not None and param.requires_grad:
-            # We assume convolution weights are the synapses.
-            # (Optional: Filter by name if only specific layers are organic)
-            
-            # 1. Normalize weights to [0, 1] domain to query the polynomial
-            # Assuming weights are in range [-1, 1] approximately, we map to [0, 1]
-            # w_norm in [0, 1]
-            w_norm = (torch.clamp(param.data, -1.0, 1.0) + 1.0) / 2.0
-            
-            # 2. Calculate scaling factors
-            # We use CPU for numpy polyval or implement polyval in torch
-            # To be efficient, let's implement polyval in torch
-            def torch_polyval(p, x):
-                # p is array of coeffs [c_n, ..., c_0]
-                val = torch.zeros_like(x)
-                for c in p:
-                    val = val * x + c
-                return val
-
-            # Get coefficients as tensors on the same device
-            ltp_coeffs = torch.tensor(config.LTP_POLY, device=param.device, dtype=param.dtype)
-            ltd_coeffs = torch.tensor(config.LTD_POLY, device=param.device, dtype=param.dtype)
-            
-            # Calculate predicted delta (slope)
-            # The polynomial predicts "Delta" for a single pulse.
-            # We treat this Delta as a scaling factor for the gradient.
-            # If the slope is small (saturation), the gradient should be suppressed.
-            
-            # Note: The polynomials were fitted on *normalized* data [0, 1].
-            slope_ltp = torch.abs(torch_polyval(ltp_coeffs, w_norm))
-            slope_ltd = torch.abs(torch_polyval(ltd_coeffs, w_norm))
-            
-            # 3. Apply scaling based on gradient direction
-            # If grad < 0, we want to increase weight -> LTP
-            # If grad > 0, we want to decrease weight -> LTD
-            # (Note: optimizer step is w = w - lr * grad)
-            
-            # Mask for LTP (Gradient is negative, so update is positive)
-            ltp_mask = (param.grad < 0).float()
-            # Mask for LTD (Gradient is positive, so update is negative)
-            ltd_mask = (param.grad > 0).float()
-            
-            # Scale gradient
-            # We scale the gradient magnitude by the predicted physical slope.
-            # We normalize the slope by the maximum possible slope to keep learning rate meaningful?
-            # Or we just use it directly. The user said: "determine the Delta W based on current W".
-            # The raw polynomial output is ~0.03 (change per pulse in normalized domain).
-            # This is quite small. Standard LR is 0.001.
-            # If we multiply gradient by this slope directly, the effective LR will be very small.
-            # Strategy: Normalize the scaling factor so the *maximum* slope is 1.0.
-            # This preserves the max learning rate but enforces the *shape* of the curve.
-            
-            max_slope_ltp = np.max(np.abs(np.polyval(config.LTP_POLY, np.linspace(0, 1, 100))))
-            max_slope_ltd = np.max(np.abs(np.polyval(config.LTD_POLY, np.linspace(0, 1, 100))))
-            
-            scale_factor = ltp_mask * (slope_ltp / max_slope_ltp) + \
-                           ltd_mask * (slope_ltd / max_slope_ltd)
-            
-            # Apply scaling
-            param.grad.data = param.grad.data * scale_factor
+    for module in net.modules():
+        # [关键修改] 只筛选有机突触层
+        if isinstance(module, model.OrganicSynapseConv):
+            param = module.weight
+            if param.grad is not None:
+                # 1. 归一化权重到 [0, 1] 用于查表
+                w_norm = (torch.clamp(param.data, -1.0, 1.0) + 1.0) / 2.0
+                
+                # 2. 准备多项式系数 (确保在同一 Device)
+                ltp_coeffs = torch.tensor(config.LTP_POLY, device=param.device, dtype=param.dtype)
+                ltd_coeffs = torch.tensor(config.LTD_POLY, device=param.device, dtype=param.dtype)
+                
+                # 3. 计算多项式值 (物理斜率)
+                # 实现简单的 Horner's Method 计算多项式
+                def poly_eval(coeffs, x):
+                    res = torch.zeros_like(x)
+                    for c in coeffs:
+                        res = res * x + c
+                    return res
+                
+                slope_ltp = torch.abs(poly_eval(ltp_coeffs, w_norm))
+                slope_ltd = torch.abs(poly_eval(ltd_coeffs, w_norm))
+                
+                # 4. 根据梯度方向选择斜率
+                # grad < 0 implies w needs to increase (LTP)
+                ltp_mask = (param.grad < 0).float()
+                ltd_mask = (param.grad > 0).float()
+                
+                # 5. 计算缩放因子
+                # 为了防止学习率过小，归一化到最大斜率 (Optional, 但推荐)
+                # 这里简单处理：直接乘物理斜率可能导致训练极慢(因为数值~1e-10)，
+                # 你的 polyfit 是基于 normalized [0,1] data 的，斜率应该是 ~0.03 级别。
+                # 建议：归一化斜率，保持最大更新步长由 LR 控制，形状由物理决定。
+                max_slope = 0.05 # 估计值，或者动态计算
+                scale_factor = (ltp_mask * slope_ltp + ltd_mask * slope_ltd) / max_slope
+                
+                # 加上一个极小值防止死区
+                scale_factor = scale_factor + 0.1 
+                
+                # 应用缩放
+                param.grad.data *= scale_factor
 
 def train_one_epoch(net, dataloader, criterion, optimizer, device, epoch):
     net.train()
@@ -110,6 +88,13 @@ def train_one_epoch(net, dataloader, criterion, optimizer, device, epoch):
         # 5. 更新权重
         optimizer.step()
         
+        # [新增] 6. 强制物理约束 (Hard Constraint)
+        # 防止权重漂移出物理定义域，模拟器件的硬饱和特性
+        with torch.no_grad():
+            for module in net.modules():
+                if isinstance(module, model.OrganicSynapseConv):
+                    module.weight.data.clamp_(-1.0, 1.0)
+
         # 统计
         running_loss += loss.item()
         _, predicted = outputs.max(1)
