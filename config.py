@@ -15,9 +15,9 @@ VISUALIZATION_DIR = './results'
 # ==========================================
 BATCH_SIZE = 128
 LEARNING_RATE = 0.001
-EPOCHS = 30
+EPOCHS = 10
 WEIGHT_DECAY = 1e-4
-WARMUP_EPOCHS = 10 # 热身轮数
+WARMUP_EPOCHS = 0 # 热身轮数
 
 # ==========================================
 # 物理参数 (有机晶体管) / Physical Parameters

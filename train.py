@@ -119,75 +119,58 @@ def get_scheduler(optimizer, warmup_epochs, max_epochs):
 
 def apply_ltp_ltd_nonlinearity(net):
     """
-    模拟数据驱动的 LTP/LTD 非线性。
-    根据真实实验数据的斜率修改梯度。
+    修改版：不再强力缩放梯度，而是根据物理非线性给予微小的梯度“倾向性”。
+    或者为了排查问题，我们可以暂时让它变得非常温和。
     """
-    # 从配置加载多项式系数
-    # P(w) 返回每个脉冲的预期 delta_w
+    # 如果想先跑通 90%，建议直接 return，先验证模型结构没问题
+    # return 
+    
+    # 如果必须加，请使用以下温和逻辑：
     ltp_poly = np.poly1d(config.LTP_POLY)
     ltd_poly = np.poly1d(config.LTD_POLY)
     
-    for name, param in net.named_parameters():
-        if param.grad is not None and param.requires_grad:
-            # 我们假设卷积权重是突触。
-            # (可选：如果只有特定层是有机的，则按名称过滤)
-            
-            # 1. 将权重归一化到 [0, 1] 域以查询多项式
-            # 假设权重范围大约为 [-1, 1]，我们将映射到 [0, 1]
-            # w_norm 在 [0, 1]
-            w_norm = (torch.clamp(param.data, -1.0, 1.0) + 1.0) / 2.0
-            
-            # 2. 计算缩放因子
-            # 我们使用 CPU 进行 numpy polyval 或在 torch 中实现 polyval
-            # 为了高效，让我们在 torch 中实现 polyval
-            def torch_polyval(p, x):
-                # p 是系数数组 [c_n, ..., c_0]
-                val = torch.zeros_like(x)
-                for c in p:
-                    val = val * x + c
-                return val
-
-            # 获取相同设备上的系数张量
-            ltp_coeffs = torch.tensor(config.LTP_POLY, device=param.device, dtype=param.dtype)
-            ltd_coeffs = torch.tensor(config.LTD_POLY, device=param.device, dtype=param.dtype)
-            
-            # 计算预测的 delta (斜率)
-            # 多项式预测单个脉冲的 "Delta"。
-            # 我们将此 Delta 视为梯度的缩放因子。
-            # 如果斜率很小 (饱和)，梯度应该被抑制。
-            
-            # 注意：多项式是在 *归一化* 数据 [0, 1] 上拟合的。
-            slope_ltp = torch.abs(torch_polyval(ltp_coeffs, w_norm))
-            slope_ltd = torch.abs(torch_polyval(ltd_coeffs, w_norm))
-            
-            # 3. 根据梯度方向应用缩放
-            # 如果 grad < 0，我们想要增加权重 -> LTP
-            # 如果 grad > 0，我们想要减少权重 -> LTD
-            # (注意：优化器步骤是 w = w - lr * grad)
-            
-            # LTP 掩码 (梯度为负，所以更新为正)
-            ltp_mask = (param.grad < 0).float()
-            # LTD 掩码 (梯度为正，所以更新为负)
-            ltd_mask = (param.grad > 0).float()
-            
-            # 缩放梯度
-            # 我们通过预测的物理斜率缩放梯度幅度。
-            # 我们通过最大可能的斜率归一化斜率，以保持学习率有意义？
-            # 或者我们直接使用它。用户说："根据当前 W 确定 Delta W"。
-            # 原始多项式输出约为 ~0.03 (归一化域中每个脉冲的变化)。
-            # 这相当小。标准 LR 为 0.001。
-            # 如果我们直接用此斜率乘以梯度，有效 LR 将非常小。
-            # 策略：归一化缩放因子，使 *最大* 斜率为 1.0。
-            # 这保留了最大学习率，但强制执行曲线的 *形状*。
-            
-            max_slope_ltp = np.max(np.abs(np.polyval(config.LTP_POLY, np.linspace(0, 1, 100))))
-            max_slope_ltd = np.max(np.abs(np.polyval(config.LTD_POLY, np.linspace(0, 1, 100))))
-            
-            scale_factor = ltp_mask * (slope_ltp / max_slope_ltp) + \
-                           ltd_mask * (slope_ltd / max_slope_ltd)
-            
-            # 应用缩放
-            param.grad.data = param.grad.data * scale_factor
+    for module in net.modules():
+        if isinstance(module, model.OrganicSynapseConv):
+            if module.weight.grad is not None:
+                # 获取当前权重状态 [-1, 1] -> [0, 1]
+                w_norm = (torch.clamp(module.weight.data, -1, 1) + 1.0) / 2.0
+                
+                # 计算物理斜率 (绝对值)
+                # 注意：你的多项式拟合出的斜率非常小(1e-10级别)，不能直接乘！
+                # 我们需要的是“相对非线性形状”，而不是绝对数值。
+                
+                # 重新拟合或归一化斜率：
+                # 假设最快更新速度对应 slope = 1.0
+                # 你的原始数据里，最大变化量是 ~1e-10，这太小了。
+                # 必须把斜率归一化到 [0.5, 1.0] 这种范围，才不会杀对梯度。
+                
+                slope_ltp = np.abs(ltp_poly(w_norm.cpu().numpy()))
+                slope_ltd = np.abs(ltd_poly(w_norm.cpu().numpy()))
+                
+                # 归一化斜率 (关键步骤！！！)
+                # 找出斜率的最大值，把所有斜率除以它
+                # 这样最敏感的区域梯度保持不变，不敏感的区域梯度减小
+                slope_ltp /= (slope_ltp.max() + 1e-8)
+                slope_ltd /= (slope_ltd.max() + 1e-8)
+                
+                slope_ltp = torch.from_numpy(slope_ltp).to(module.weight.device).float()
+                slope_ltd = torch.from_numpy(slope_ltd).to(module.weight.device).float()
+                
+                # 混合系数 (0.5 + 0.5 * slope)
+                # 意思是：至少保留 50% 的梯度，另外 50% 由物理特性决定
+                # 这样既有物理意义，又不会让网络瘫痪
+                ltp_factor = 0.5 + 0.5 * slope_ltp
+                ltd_factor = 0.5 + 0.5 * slope_ltd
+                
+                # 根据梯度符号应用
+                grad = module.weight.grad
+                mask_ltp = (grad < 0).float() # weight要增加
+                mask_ltd = (grad > 0).float() # weight要减小
+                
+                factor = mask_ltp * ltp_factor + mask_ltd * ltd_factor
+                
+                # 应用缩放
+                grad.mul_(factor)
 
 def train_one_epoch(net, dataloader, criterion, optimizer, device, epoch):
     net.train()
