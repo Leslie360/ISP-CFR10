@@ -13,11 +13,12 @@ VISUALIZATION_DIR = './results'
 # ==========================================
 # 训练超参数 / Training Hyperparameters
 # ==========================================
-BATCH_SIZE = 128
-LEARNING_RATE = 0.001
-EPOCHS = 10
+BATCH_SIZE = 2048
+LEARNING_RATE = 0.01
+EPOCHS = 150
 WEIGHT_DECAY = 1e-4
-WARMUP_EPOCHS = 0 # 热身轮数
+NUM_WORKERS = 8 # 稍微给多点 CPU 线程
+WARMUP_EPOCHS = 10 # 热身轮数
 
 # ==========================================
 # 物理参数 (有机晶体管) / Physical Parameters

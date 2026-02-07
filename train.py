@@ -184,19 +184,36 @@ def train_one_epoch(net, dataloader, criterion, optimizer, device, epoch):
         # 1. 清零梯度
         optimizer.zero_grad()
         
-        # 2. 前向传播 (Forward)
-        # 此时 model.OrganicSynapseConv 会自动加入器件噪声 (Device Noise)
-        outputs = net(inputs)
-        loss = criterion(outputs, labels)
+        # ================= [修改] 使用 AMP 上下文 =================
+        # 原代码：
+        # outputs = net(inputs)
+        # loss = criterion(outputs, targets)
+        # loss.backward()
+        # apply_ltp_ltd_nonlinearity(net)
+        # optimizer.step()
         
-        # 3. 反向传播 (Backward)
-        loss.backward()
+        # 新代码：
+        # 使用 bfloat16 (RTX 30/40/50 系列专用，数值更稳)
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            outputs = net(inputs)
+            loss = criterion(outputs, labels)
         
-        # 4. 模拟突触更新非线性 (LTP/LTD Simulation)
-        apply_ltp_ltd_nonlinearity(net)
+        # 使用 scaler 进行反向传播
+        scaler.scale(loss).backward()
         
-        # 5. 更新权重
-        optimizer.step()
+        #如果你还想保留那个 LTP/LTD 的非线性梯度操作 (apply_ltp_ltd_nonlinearity)
+        # 必须先 unscale 梯度，否则梯度是乱的
+        scaler.unscale_(optimizer) 
+        
+        # 在这里调用你的物理非线性函数 (如果有的话)
+        # apply_ltp_ltd_nonlinearity(net) 
+        
+        # 梯度裁剪 (可选，防止梯度爆炸)
+        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=2.0)
+
+        scaler.step(optimizer)
+        scaler.update()
+        # ===========================================================
         
         # [新增] 6. 强制物理约束 (Hard Constraint)
         # 防止权重漂移出物理定义域，模拟器件的硬饱和特性
@@ -268,11 +285,25 @@ def main():
     # 3. 模型构建 (ResNet18 with OrganicSynapseConv)
     logger.info("Building Model (Organic Transistor Synapse Simulation)...")
     net = model.get_model().to(device)
-    
+
+    # ================= [新增] 2. 启用 torch.compile 加速 =================
+    # 这会把你的模型编译成优化的内核，大幅减少 Python 开销
+    print("[Infra] Compiling model with torch.compile...")
+    try:
+        # Windows/WSL 下如果报错，可以把 mode 改为 'default' 或注释掉这行
+        net = torch.compile(net, mode='max-autotune') 
+    except Exception as e:
+        print(f"[Warning] torch.compile failed: {e}. Continuing without compilation.")
+    # ====================================================================
+
     # 4. 优化器与调度器
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(net.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
     
+    # ================= [新增] 初始化 AMP Scaler =================
+    scaler = torch.amp.GradScaler('cuda') 
+    # ===========================================================
+
     # 使用带 Warmup 的调度器
     # 注意：如果从断点恢复，调度器状态也会被加载，这里初始化只是为了创建对象
     scheduler = get_scheduler(optimizer, warmup_epochs=config.WARMUP_EPOCHS, max_epochs=config.EPOCHS)
