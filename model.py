@@ -18,55 +18,36 @@ class OrganicSynapseConv(nn.Conv2d):
         # self.g_min, self.g_max = config.CONDUCTANCE_RANGE # 已移除，现在使用物理映射
 
     def forward(self, input):
-        # 1. 权重映射到归一化范围 [0, 1]
-        # 我们假设网络学习到的权重在一个较宽的范围内，但我们将它们钳位
-        # 以代表有限的电导状态。
-        # 由于我们使用标准训练，权重可能为负。
-        # 概念上我们将 [-1, 1] (或其他范围) 映射到物理 [Min, Max]。
-        # 这里为了简化与提供的物理数据映射，我们钳位到 [0, 1]。
-        # (假设网络适应正权重或偏移权重，或者我们将此视为幅值)。
-        # 对于标准 ResNet，权重以 0 为中心。
-        # 让我们将 [-1, 1] -> [0, 1] 用于注入噪声，然后再映射回来。
-        # w_norm = (self.weight.tanh() + 1) / 2 # 平滑映射到 [0, 1]
-        # 或者如果我们想强制硬约束，只需钳位并平移。
-        # 用户要求："将 ... 映射到物理电流范围 ... 添加 DEVICE_NOISE_STD ... 然后映射回来"
+        # 1. 准备物理参数 (保持不变)
+        g_min = config.PHYSICAL_MIN_CURRENT
+        g_max = config.PHYSICAL_MAX_CURRENT
+        # 动态范围
+        dynamic_range = g_max - g_min
         
-        # 让我们使用线性映射策略进行噪声注入：
-        # 我们将当前权重值视为"归一化电导"。
-        # 我们将在克隆的张量上操作以避免对梯度的原位操作。
+        # 2. 将标准化权重 [-1, 1] 映射到 物理电流域 [I_min, I_max]
+        # w_norm: [-1, 1] -> [0, 1]
+        w_zero_one = (torch.clamp(self.weight, -1, 1) + 1.0) / 2.0
+        w_physical = w_zero_one * dynamic_range + g_min
         
-        # 步骤 A: 将权重钳位到模拟的归一化范围 [-1, 1]
-        w_clamped = torch.clamp(self.weight, -1.0, 1.0)
-        
-        # 步骤 B: 映射到物理电流域 (安培)
-        # 我们将 [-1, 1] 映射到 [Min_Current, Max_Current]
-        # 为了处理负权重 (抑制性突触)，我们映射幅值？
-        # 或者器件是否支持正/负电流？
-        # 通常有机晶体管是单极性的 (积累模式)。
-        # 为了支持标准神经网络，我们通常使用两个器件 (G+ - G-) 或一个参考。
-        # 简化：我们假设噪声添加到权重的 *幅值* 上，与物理电流比例成正比。
-        
-        # 映射归一化 [-1, 1] -> 物理 [Min, Max]
-        # 我们映射范围：
-        # 物理跨度 = Max - Min
-        # 权重跨度 = 2 (从 -1 到 1)
-        scale = (config.PHYSICAL_MAX_CURRENT - config.PHYSICAL_MIN_CURRENT) / 2.0
-        bias = (config.PHYSICAL_MAX_CURRENT + config.PHYSICAL_MIN_CURRENT) / 2.0
-        
-        w_physical = w_clamped * scale + bias # 现在单位是安培 (近似)
-        
-        # 步骤 C: 添加物理噪声 (安培)
-        if self.training or True:
+        # 3. [关键步骤] 注入器件物理噪声 (在物理域进行)
+        if self.training:
+            # 生成高斯噪声 (单位: Ampere)
             noise = torch.randn_like(w_physical) * config.DEVICE_NOISE_STD
-            w_physical_noisy = w_physical + noise
-        else:
-            w_physical_noisy = w_physical
+            w_noisy_physical = w_physical + noise
             
-        # 步骤 D: 映射回权重域
-        w_noisy = (w_physical_noisy - bias) / scale
-        
-        # 使用修改后的权重执行卷积
-        return F.conv2d(input, w_noisy, self.bias, self.stride,
+            # 物理截断 (电流不可能超过物理极限)
+            w_noisy_physical = torch.clamp(w_noisy_physical, g_min, g_max)
+        else:
+            w_noisy_physical = w_physical
+
+        # 4. [这是你缺失的步骤] 模拟读出电路 (TIA)
+        # 将纳安级电流 (1e-9) 重新映射回 神经网络适用的数值范围 [-1, 1]
+        # 否则卷积输出会趋近于0，导致梯度消失
+        w_normalized_for_calc = (w_noisy_physical - g_min) / dynamic_range # 变回 [0, 1]
+        w_normalized_for_calc = w_normalized_for_calc * 2.0 - 1.0        # 变回 [-1, 1]
+
+        # 5. 使用“带噪声但数值正常”的权重进行卷积
+        return F.conv2d(input, w_normalized_for_calc, self.bias, self.stride,
                         self.padding, self.dilation, self.groups)
 
 class BasicBlock(nn.Module):

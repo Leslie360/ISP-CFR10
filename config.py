@@ -23,7 +23,7 @@ WARMUP_EPOCHS = 10 # 热身轮数
 # 物理参数 (有机晶体管) / Physical Parameters
 # ==========================================
 # 1. 模拟光子噪声的光强 (Poisson Noise)
-MAX_PHOTONS = 1000  
+MAX_PHOTONS = 10000  
 
 # 2. 光谱响应系数 (RGB Responsivity)
 # 输入通道 *= 响应系数
