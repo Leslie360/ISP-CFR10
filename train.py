@@ -172,7 +172,7 @@ def apply_ltp_ltd_nonlinearity(net):
                 # 应用缩放
                 grad.mul_(factor)
 
-def train_one_epoch(net, dataloader, criterion, optimizer, device, epoch):
+def train_one_epoch(net, dataloader, criterion, optimizer, device, epoch, scaler):
     net.train()
     running_loss = 0.0
     correct = 0
@@ -310,10 +310,15 @@ def main():
     
     # 5. 断点续训逻辑 / Resume Training
     start_epoch = 0
-    if args.resume:
-        if os.path.isfile(args.resume):
-            print(f"==> Loading checkpoint '{args.resume}'")
-            checkpoint = torch.load(args.resume)
+    best_acc = 0.0
+    
+    # 优先使用命令行参数，其次使用 config 中的默认值
+    resume_path = args.resume if args.resume else config.RESUME_PATH
+    
+    if resume_path:
+        if os.path.isfile(resume_path):
+            print(f"==> Loading checkpoint '{resume_path}'")
+            checkpoint = torch.load(resume_path, map_location=device)
             
             # 1. 加载模型权重 (必须)
             net.load_state_dict(checkpoint['model_state_dict'])
@@ -321,21 +326,20 @@ def main():
             # 2. 加载优化器状态 (推荐，保留动量)
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             
-            # 3. [已删除] 千万不要加载 scheduler_state_dict !!!
-            # scheduler.load_state_dict(checkpoint['scheduler_state_dict']) 
-            
-            # 4. 更新起始轮数
+            # 3. 更新起始轮数
             start_epoch = checkpoint['epoch']
             
-            # 5. [新增] 强制对齐 Scheduler 的步数
-            # 告诉新的调度器，我们已经跑了 start_epoch 轮了
-            # 这样它会算出当前应该有的 LR (比如 0.016 衰减了一点点)，而不是从头开始
+            # 4. 加载最佳准确率 (如果有)
+            if 'best_acc' in checkpoint:
+                best_acc = checkpoint['best_acc']
+            
+            # 5. 强制对齐 Scheduler 的步数
             for _ in range(start_epoch):
                 scheduler.step()
                 
-            print(f"==> Loaded checkpoint (epoch {checkpoint['epoch']})")
+            print(f"==> Loaded checkpoint (epoch {checkpoint['epoch']}, best_acc {best_acc:.2f}%)")
         else:
-            print(f"==> No checkpoint found at '{args.resume}'")
+            print(f"==> No checkpoint found at '{resume_path}'")
 
     # 6. 训练循环
     logger.info(f"Start Training from epoch {start_epoch+1} to {config.EPOCHS}...")
@@ -350,7 +354,7 @@ def main():
         for epoch in range(start_epoch, config.EPOCHS):
             start_time = time.time()
             
-            train_loss, train_acc = train_one_epoch(net, trainloader, criterion, optimizer, device, epoch)
+            train_loss, train_acc = train_one_epoch(net, trainloader, criterion, optimizer, device, epoch, scaler)
             val_loss, val_acc = validate(net, valloader, criterion, device)
             
             scheduler.step()
