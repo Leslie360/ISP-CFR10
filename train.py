@@ -206,7 +206,7 @@ def train_one_epoch(net, dataloader, criterion, optimizer, device, epoch, scaler
         scaler.unscale_(optimizer) 
         
         # 在这里调用你的物理非线性函数 (如果有的话)
-        # apply_ltp_ltd_nonlinearity(net) 
+        apply_ltp_ltd_nonlinearity(net) 
         
         # 梯度裁剪 (可选，防止梯度爆炸)
         torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=2.0)

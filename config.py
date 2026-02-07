@@ -15,7 +15,7 @@ VISUALIZATION_DIR = './results'
 # ==========================================
 BATCH_SIZE = 2048
 LEARNING_RATE = 0.01
-EPOCHS = 150
+EPOCHS = 300
 WEIGHT_DECAY = 1e-4
 NUM_WORKERS = 8 # 稍微给多点 CPU 线程
 WARMUP_EPOCHS = 10 # 热身轮数

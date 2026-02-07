@@ -4,3 +4,5 @@ venv/
 checkpoints/
 logs/
 results/
+cifar10_rgb_physical_output/
+

@@ -14,7 +14,7 @@ import os
 GAMMA = 2.2
 # 模拟最大光子数。
 # 设置为 300，既能看到噪声，又能保留图像轮廓
-MAX_PHOTONS = 50  
+MAX_PHOTONS = 10000  
 OUTPUT_DIR = "./cifar10_rgb_physical_output"
 
 # ==========================================
