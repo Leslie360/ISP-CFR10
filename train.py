@@ -7,60 +7,121 @@ import config
 import dataset
 import model
 
-import numpy as np
+import logging
+import sys
+
+# ==========================================
+# 日志设置 / Logging Setup
+# ==========================================
+def setup_logger(log_dir):
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+        
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"train_log_{timestamp}.txt")
+    
+    # 配置 logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    return logging.getLogger()
+
+def log_config_parameters(logger):
+    """记录所有配置参数到日志"""
+    logger.info("="*40)
+    logger.info("训练配置参数 / Training Configuration")
+    logger.info("="*40)
+    
+    # 遍历 config 模块中的变量
+    for key in dir(config):
+        if not key.startswith("__"):
+            value = getattr(config, key)
+            # 过滤掉模块引用，只保留数据
+            if not isinstance(value, type(sys)):
+                logger.info(f"{key}: {value}")
+    logger.info("="*40)
 
 # ==========================================
 # 工具函数 / Utils
 # ==========================================
+import numpy as np # Re-import numpy as it was removed
+
 def apply_ltp_ltd_nonlinearity(net):
     """
-    仅对 OrganicSynapseConv 层应用基于物理数据的非线性梯度缩放
+    模拟数据驱动的 LTP/LTD 非线性。
+    根据真实实验数据的斜率修改梯度。
     """
-    # 预先加载系数到 Tensor (避免在循环中重复转换)
-    # 假设模型在 GPU，这里创建个 buffer 或者在循环里处理
-    # 简单起见，在循环里判断 device
+    # 从配置加载多项式系数
+    # P(w) 返回每个脉冲的预期 delta_w
+    ltp_poly = np.poly1d(config.LTP_POLY)
+    ltd_poly = np.poly1d(config.LTD_POLY)
     
-    for module in net.modules():
-        # [关键修改] 只筛选有机突触层
-        if isinstance(module, model.OrganicSynapseConv):
-            param = module.weight
-            if param.grad is not None:
-                # 1. 归一化权重到 [0, 1] 用于查表
-                w_norm = (torch.clamp(param.data, -1.0, 1.0) + 1.0) / 2.0
-                
-                # 2. 准备多项式系数 (确保在同一 Device)
-                ltp_coeffs = torch.tensor(config.LTP_POLY, device=param.device, dtype=param.dtype)
-                ltd_coeffs = torch.tensor(config.LTD_POLY, device=param.device, dtype=param.dtype)
-                
-                # 3. 计算多项式值 (物理斜率)
-                # 实现简单的 Horner's Method 计算多项式
-                def poly_eval(coeffs, x):
-                    res = torch.zeros_like(x)
-                    for c in coeffs:
-                        res = res * x + c
-                    return res
-                
-                slope_ltp = torch.abs(poly_eval(ltp_coeffs, w_norm))
-                slope_ltd = torch.abs(poly_eval(ltd_coeffs, w_norm))
-                
-                # 4. 根据梯度方向选择斜率
-                # grad < 0 implies w needs to increase (LTP)
-                ltp_mask = (param.grad < 0).float()
-                ltd_mask = (param.grad > 0).float()
-                
-                # 5. 计算缩放因子
-                # 为了防止学习率过小，归一化到最大斜率 (Optional, 但推荐)
-                # 这里简单处理：直接乘物理斜率可能导致训练极慢(因为数值~1e-10)，
-                # 你的 polyfit 是基于 normalized [0,1] data 的，斜率应该是 ~0.03 级别。
-                # 建议：归一化斜率，保持最大更新步长由 LR 控制，形状由物理决定。
-                max_slope = 0.05 # 估计值，或者动态计算
-                scale_factor = (ltp_mask * slope_ltp + ltd_mask * slope_ltd) / max_slope
-                
-                # 加上一个极小值防止死区
-                scale_factor = scale_factor + 0.1 
-                
-                # 应用缩放
-                param.grad.data *= scale_factor
+    for name, param in net.named_parameters():
+        if param.grad is not None and param.requires_grad:
+            # 我们假设卷积权重是突触。
+            # (可选：如果只有特定层是有机的，则按名称过滤)
+            
+            # 1. 将权重归一化到 [0, 1] 域以查询多项式
+            # 假设权重范围大约为 [-1, 1]，我们将映射到 [0, 1]
+            # w_norm 在 [0, 1]
+            w_norm = (torch.clamp(param.data, -1.0, 1.0) + 1.0) / 2.0
+            
+            # 2. 计算缩放因子
+            # 我们使用 CPU 进行 numpy polyval 或在 torch 中实现 polyval
+            # 为了高效，让我们在 torch 中实现 polyval
+            def torch_polyval(p, x):
+                # p 是系数数组 [c_n, ..., c_0]
+                val = torch.zeros_like(x)
+                for c in p:
+                    val = val * x + c
+                return val
+
+            # 获取相同设备上的系数张量
+            ltp_coeffs = torch.tensor(config.LTP_POLY, device=param.device, dtype=param.dtype)
+            ltd_coeffs = torch.tensor(config.LTD_POLY, device=param.device, dtype=param.dtype)
+            
+            # 计算预测的 delta (斜率)
+            # 多项式预测单个脉冲的 "Delta"。
+            # 我们将此 Delta 视为梯度的缩放因子。
+            # 如果斜率很小 (饱和)，梯度应该被抑制。
+            
+            # 注意：多项式是在 *归一化* 数据 [0, 1] 上拟合的。
+            slope_ltp = torch.abs(torch_polyval(ltp_coeffs, w_norm))
+            slope_ltd = torch.abs(torch_polyval(ltd_coeffs, w_norm))
+            
+            # 3. 根据梯度方向应用缩放
+            # 如果 grad < 0，我们想要增加权重 -> LTP
+            # 如果 grad > 0，我们想要减少权重 -> LTD
+            # (注意：优化器步骤是 w = w - lr * grad)
+            
+            # LTP 掩码 (梯度为负，所以更新为正)
+            ltp_mask = (param.grad < 0).float()
+            # LTD 掩码 (梯度为正，所以更新为负)
+            ltd_mask = (param.grad > 0).float()
+            
+            # 缩放梯度
+            # 我们通过预测的物理斜率缩放梯度幅度。
+            # 我们通过最大可能的斜率归一化斜率，以保持学习率有意义？
+            # 或者我们直接使用它。用户说："根据当前 W 确定 Delta W"。
+            # 原始多项式输出约为 ~0.03 (归一化域中每个脉冲的变化)。
+            # 这相当小。标准 LR 为 0.001。
+            # 如果我们直接用此斜率乘以梯度，有效 LR 将非常小。
+            # 策略：归一化缩放因子，使 *最大* 斜率为 1.0。
+            # 这保留了最大学习率，但强制执行曲线的 *形状*。
+            
+            max_slope_ltp = np.max(np.abs(np.polyval(config.LTP_POLY, np.linspace(0, 1, 100))))
+            max_slope_ltd = np.max(np.abs(np.polyval(config.LTD_POLY, np.linspace(0, 1, 100))))
+            
+            scale_factor = ltp_mask * (slope_ltp / max_slope_ltp) + \
+                           ltd_mask * (slope_ltd / max_slope_ltd)
+            
+            # 应用缩放
+            param.grad.data = param.grad.data * scale_factor
 
 def train_one_epoch(net, dataloader, criterion, optimizer, device, epoch):
     net.train()
@@ -135,17 +196,23 @@ def validate(net, dataloader, criterion, device):
 def main():
     # 1. 环境设置
     device = torch.device(config.DEVICE)
-    print(f"Using device: {device}")
+    
+    # 设置日志
+    logger = setup_logger(config.LOG_DIR)
+    logger.info(f"Using device: {device}")
+    
+    # 记录配置参数
+    log_config_parameters(logger)
     
     if not os.path.exists(config.CHECKPOINT_DIR):
         os.makedirs(config.CHECKPOINT_DIR)
         
     # 2. 数据准备
-    print("Preparing Data (Physical Optic Simulation + Augmentation)...")
+    logger.info("Preparing Data (Physical Optic Simulation + Augmentation)...")
     trainloader, valloader = dataset.get_dataloaders()
     
     # 3. 模型构建 (ResNet18 with OrganicSynapseConv)
-    print("Building Model (Organic Transistor Synapse Simulation)...")
+    logger.info("Building Model (Organic Transistor Synapse Simulation)...")
     net = model.get_model().to(device)
     
     # 4. 优化器与调度器
@@ -155,7 +222,7 @@ def main():
     
     # 5. 训练循环
     best_acc = 0.0
-    print(f"Start Training for {config.EPOCHS} epochs...")
+    logger.info(f"Start Training for {config.EPOCHS} epochs...")
     
     for epoch in range(config.EPOCHS):
         start_time = time.time()
@@ -167,20 +234,21 @@ def main():
         
         duration = time.time() - start_time
         
-        print(f"Epoch [{epoch+1}/{config.EPOCHS}] "
-              f"Time: {duration:.1f}s | "
-              f"Train Loss: {train_loss:.4f} Acc: {train_acc:.2f}% | "
-              f"Val Loss: {val_loss:.4f} Acc: {val_acc:.2f}% | "
-              f"LR: {optimizer.param_groups[0]['lr']:.6f}")
+        log_msg = (f"Epoch [{epoch+1}/{config.EPOCHS}] "
+                   f"Time: {duration:.1f}s | "
+                   f"Train Loss: {train_loss:.4f} Acc: {train_acc:.2f}% | "
+                   f"Val Loss: {val_loss:.4f} Acc: {val_acc:.2f}% | "
+                   f"LR: {optimizer.param_groups[0]['lr']:.6f}")
+        logger.info(log_msg)
         
         # 保存最佳模型
         if val_acc > best_acc:
             best_acc = val_acc
             save_path = os.path.join(config.CHECKPOINT_DIR, 'best_model.pth')
             torch.save(net.state_dict(), save_path)
-            print(f"Saved Best Model (Acc: {best_acc:.2f}%) to {save_path}")
+            logger.info(f"Saved Best Model (Acc: {best_acc:.2f}%) to {save_path}")
 
-    print("Training Finished.")
+    logger.info("Training Finished.")
 
 if __name__ == '__main__':
     main()

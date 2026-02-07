@@ -5,69 +5,67 @@ import config
 
 class OrganicSynapseConv(nn.Conv2d):
     """
-    Custom Convolution Layer simulating Organic Transistor Synapses.
-    Features:
-    1. Weight Saturation (Conductance Range)
-    2. Device Variability (Gaussian Noise on Weights)
+    模拟有机晶体管突触的自定义卷积层。
+    特性：
+    1. 权重饱和 (电导范围限制)
+    2. 器件变异性 (权重上的高斯噪声)
     """
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=False):
         super(OrganicSynapseConv, self).__init__(
             in_channels, out_channels, kernel_size, stride, padding, bias=bias
         )
         self.noise_std = config.DEVICE_NOISE_STD
-        # self.g_min, self.g_max = config.CONDUCTANCE_RANGE # Removed, using physical mapping now
+        # self.g_min, self.g_max = config.CONDUCTANCE_RANGE # 已移除，现在使用物理映射
 
     def forward(self, input):
-        # 1. Weight Mapping to Normalized Range [0, 1]
-        # We assume the network learns weights in a broader range, but we clamp them 
-        # to represent the finite conductance states.
-        # Since we use standard training, weights can be negative. 
-        # We map [-1, 1] (or whatever range) to physical [Min, Max] conceptually.
-        # Here we just clamp to [0, 1] for simplicity of mapping to the physical data provided.
-        # (Assuming the network adapts to positive-only or shifted weights if necessary, 
-        # or we treat this as magnitude).
-        # For a standard ResNet, weights are centered at 0.
-        # Let's map [-1, 1] -> [0, 1] for noise injection, then map back.
-        # w_norm = (self.weight.tanh() + 1) / 2 # Smooth mapping to [0, 1]
-        # OR simply clamp and shift if we want to enforce hard constraints.
-        # User requirement: "Map ... to physical current range ... to add DEVICE_NOISE_STD ... then map back"
+        # 1. 权重映射到归一化范围 [0, 1]
+        # 我们假设网络学习到的权重在一个较宽的范围内，但我们将它们钳位
+        # 以代表有限的电导状态。
+        # 由于我们使用标准训练，权重可能为负。
+        # 概念上我们将 [-1, 1] (或其他范围) 映射到物理 [Min, Max]。
+        # 这里为了简化与提供的物理数据映射，我们钳位到 [0, 1]。
+        # (假设网络适应正权重或偏移权重，或者我们将此视为幅值)。
+        # 对于标准 ResNet，权重以 0 为中心。
+        # 让我们将 [-1, 1] -> [0, 1] 用于注入噪声，然后再映射回来。
+        # w_norm = (self.weight.tanh() + 1) / 2 # 平滑映射到 [0, 1]
+        # 或者如果我们想强制硬约束，只需钳位并平移。
+        # 用户要求："将 ... 映射到物理电流范围 ... 添加 DEVICE_NOISE_STD ... 然后映射回来"
         
-        # Let's use a linear mapping strategy for noise injection:
-        # We treat the current weight value as "normalized conductance".
-        # We'll work on a cloned tensor to avoid in-place ops on gradients.
+        # 让我们使用线性映射策略进行噪声注入：
+        # 我们将当前权重值视为"归一化电导"。
+        # 我们将在克隆的张量上操作以避免对梯度的原位操作。
         
-        # Step A: Clamp weights to simulated normalized range [-1, 1]
+        # 步骤 A: 将权重钳位到模拟的归一化范围 [-1, 1]
         w_clamped = torch.clamp(self.weight, -1.0, 1.0)
         
-        # Step B: Map to Physical Current Domain (Amperes)
-        # We map [-1, 1] to [Min_Current, Max_Current]
-        # To handle negative weights (inhibitory synapses), we map magnitude?
-        # Or does the device support positive/negative currents?
-        # Usually organic transistors are unipolar (accumulation mode).
-        # To support standard NN, we typically use two devices (G+ - G-) or a reference.
-        # SIMPLIFICATION: We assume the noise is added to the *magnitude* of the weight 
-        # proportional to the physical current scale.
+        # 步骤 B: 映射到物理电流域 (安培)
+        # 我们将 [-1, 1] 映射到 [Min_Current, Max_Current]
+        # 为了处理负权重 (抑制性突触)，我们映射幅值？
+        # 或者器件是否支持正/负电流？
+        # 通常有机晶体管是单极性的 (积累模式)。
+        # 为了支持标准神经网络，我们通常使用两个器件 (G+ - G-) 或一个参考。
+        # 简化：我们假设噪声添加到权重的 *幅值* 上，与物理电流比例成正比。
         
-        # Map Normalized [-1, 1] -> Physical [Min, Max]
-        # We map the range:
-        # Physical Span = Max - Min
-        # Weight Span = 2 (from -1 to 1)
+        # 映射归一化 [-1, 1] -> 物理 [Min, Max]
+        # 我们映射范围：
+        # 物理跨度 = Max - Min
+        # 权重跨度 = 2 (从 -1 到 1)
         scale = (config.PHYSICAL_MAX_CURRENT - config.PHYSICAL_MIN_CURRENT) / 2.0
         bias = (config.PHYSICAL_MAX_CURRENT + config.PHYSICAL_MIN_CURRENT) / 2.0
         
-        w_physical = w_clamped * scale + bias # Now in Amperes (approx)
+        w_physical = w_clamped * scale + bias # 现在单位是安培 (近似)
         
-        # Step C: Add Physical Noise (in Amperes)
+        # 步骤 C: 添加物理噪声 (安培)
         if self.training or True:
             noise = torch.randn_like(w_physical) * config.DEVICE_NOISE_STD
             w_physical_noisy = w_physical + noise
         else:
             w_physical_noisy = w_physical
             
-        # Step D: Map back to Weight Domain
+        # 步骤 D: 映射回权重域
         w_noisy = (w_physical_noisy - bias) / scale
         
-        # Perform convolution with the modified weights
+        # 使用修改后的权重执行卷积
         return F.conv2d(input, w_noisy, self.bias, self.stride,
                         self.padding, self.dilation, self.groups)
 
@@ -76,7 +74,7 @@ class BasicBlock(nn.Module):
 
     def __init__(self, in_planes, planes, stride=1):
         super(BasicBlock, self).__init__()
-        # Use OrganicSynapseConv instead of nn.Conv2d
+        # 使用 OrganicSynapseConv 代替 nn.Conv2d
         self.conv1 = OrganicSynapseConv(
             in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(planes)
@@ -93,7 +91,7 @@ class BasicBlock(nn.Module):
                 nn.BatchNorm2d(self.expansion*planes)
             )
         
-        # Dropout to prevent overfitting as requested
+        # 添加 Dropout 以防止过拟合
         self.dropout = nn.Dropout(p=0.1)
 
     def forward(self, x):
