@@ -291,7 +291,7 @@ def main():
     print("[Infra] Compiling model with torch.compile...")
     try:
         # Windows/WSL 下如果报错，可以把 mode 改为 'default' 或注释掉这行
-        net = torch.compile(net, mode='max-autotune') 
+        net = torch.compile(net, mode='reduce-overhead')
     except Exception as e:
         print(f"[Warning] torch.compile failed: {e}. Continuing without compilation.")
     # ====================================================================
@@ -310,26 +310,32 @@ def main():
     
     # 5. 断点续训逻辑 / Resume Training
     start_epoch = 0
-    best_acc = 0.0
-    
-    # 优先使用命令行参数，其次使用 config 中的默认值
-    resume_path = args.resume if args.resume else config.RESUME_PATH
-    
-    if resume_path:
-        if os.path.isfile(resume_path):
-            logger.info(f"Loading checkpoint '{resume_path}'...")
-            checkpoint = torch.load(resume_path, map_location=device)
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print(f"==> Loading checkpoint '{args.resume}'")
+            checkpoint = torch.load(args.resume)
             
-            # 恢复状态
-            start_epoch = checkpoint['epoch']
-            best_acc = checkpoint['best_acc']
+            # 1. 加载模型权重 (必须)
             net.load_state_dict(checkpoint['model_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             
-            logger.info(f"Loaded checkpoint from epoch {start_epoch}, Best Acc: {best_acc:.2f}%")
+            # 2. 加载优化器状态 (推荐，保留动量)
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # 3. [已删除] 千万不要加载 scheduler_state_dict !!!
+            # scheduler.load_state_dict(checkpoint['scheduler_state_dict']) 
+            
+            # 4. 更新起始轮数
+            start_epoch = checkpoint['epoch']
+            
+            # 5. [新增] 强制对齐 Scheduler 的步数
+            # 告诉新的调度器，我们已经跑了 start_epoch 轮了
+            # 这样它会算出当前应该有的 LR (比如 0.016 衰减了一点点)，而不是从头开始
+            for _ in range(start_epoch):
+                scheduler.step()
+                
+            print(f"==> Loaded checkpoint (epoch {checkpoint['epoch']})")
         else:
-            logger.warning(f"No checkpoint found at '{resume_path}'")
+            print(f"==> No checkpoint found at '{args.resume}'")
 
     # 6. 训练循环
     logger.info(f"Start Training from epoch {start_epoch+1} to {config.EPOCHS}...")
