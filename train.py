@@ -10,6 +10,50 @@ import model
 import logging
 import sys
 
+import argparse
+import matplotlib
+matplotlib.use('Agg') # 非交互模式
+import matplotlib.pyplot as plt
+
+# ==========================================
+# 绘图函数 / Plotting
+# ==========================================
+def plot_training_curves(log_data, save_path):
+    """
+    绘制训练曲线 (Loss 和 Accuracy)
+    log_data: dict, 包含 'train_losses', 'val_losses', 'train_accs', 'val_accs'
+    """
+    if not os.path.exists(os.path.dirname(save_path)):
+        os.makedirs(os.path.dirname(save_path))
+        
+    epochs = range(1, len(log_data['train_losses']) + 1)
+    
+    plt.figure(figsize=(12, 5))
+    
+    # 1. Loss 曲线
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs, log_data['train_losses'], 'b-', label='Train Loss')
+    plt.plot(epochs, log_data['val_losses'], 'r-', label='Val Loss')
+    plt.title('Training & Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True)
+    
+    # 2. Accuracy 曲线
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs, log_data['train_accs'], 'b-', label='Train Acc')
+    plt.plot(epochs, log_data['val_accs'], 'r-', label='Val Acc')
+    plt.title('Training & Validation Accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy (%)')
+    plt.legend()
+    plt.grid(True)
+    
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
 # ==========================================
 # 日志设置 / Logging Setup
 # ==========================================
@@ -50,6 +94,28 @@ def log_config_parameters(logger):
 # 工具函数 / Utils
 # ==========================================
 import numpy as np # Re-import numpy as it was removed
+
+def get_scheduler(optimizer, warmup_epochs, max_epochs):
+    """
+    创建带 Warmup 的余弦退火学习率调度器。
+    
+    Args:
+        optimizer: 优化器
+        warmup_epochs: 热身轮数
+        max_epochs: 总训练轮数
+    """
+    # 定义 lambda 函数
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            # 线性热身: 从 0 增加到 1
+            return float(epoch + 1) / float(max_epochs) if max_epochs == 0 else float(epoch + 1) / float(warmup_epochs)
+        else:
+            # 余弦退火: 从 1 减少到 0
+            # 进度 progress 从 0 到 1
+            progress = float(epoch - warmup_epochs) / float(max_epochs - warmup_epochs)
+            return 0.5 * (1.0 + np.cos(np.pi * progress))
+
+    return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 def apply_ltp_ltd_nonlinearity(net):
     """
@@ -194,6 +260,11 @@ def validate(net, dataloader, criterion, device):
     return val_loss, val_acc
 
 def main():
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='Organic Transistor Synapse Training')
+    parser.add_argument('--resume', type=str, default=None, help='path to latest checkpoint (default: None)')
+    args = parser.parse_args()
+    
     # 1. 环境设置
     device = torch.device(config.DEVICE)
     
@@ -218,37 +289,99 @@ def main():
     # 4. 优化器与调度器
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(net.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.EPOCHS)
     
-    # 5. 训练循环
+    # 使用带 Warmup 的调度器
+    # 注意：如果从断点恢复，调度器状态也会被加载，这里初始化只是为了创建对象
+    scheduler = get_scheduler(optimizer, warmup_epochs=config.WARMUP_EPOCHS, max_epochs=config.EPOCHS)
+    
+    # 5. 断点续训逻辑 / Resume Training
+    start_epoch = 0
     best_acc = 0.0
-    logger.info(f"Start Training for {config.EPOCHS} epochs...")
     
-    for epoch in range(config.EPOCHS):
-        start_time = time.time()
-        
-        train_loss, train_acc = train_one_epoch(net, trainloader, criterion, optimizer, device, epoch)
-        val_loss, val_acc = validate(net, valloader, criterion, device)
-        
-        scheduler.step()
-        
-        duration = time.time() - start_time
-        
-        log_msg = (f"Epoch [{epoch+1}/{config.EPOCHS}] "
-                   f"Time: {duration:.1f}s | "
-                   f"Train Loss: {train_loss:.4f} Acc: {train_acc:.2f}% | "
-                   f"Val Loss: {val_loss:.4f} Acc: {val_acc:.2f}% | "
-                   f"LR: {optimizer.param_groups[0]['lr']:.6f}")
-        logger.info(log_msg)
-        
-        # 保存最佳模型
-        if val_acc > best_acc:
-            best_acc = val_acc
-            save_path = os.path.join(config.CHECKPOINT_DIR, 'best_model.pth')
-            torch.save(net.state_dict(), save_path)
-            logger.info(f"Saved Best Model (Acc: {best_acc:.2f}%) to {save_path}")
+    # 优先使用命令行参数，其次使用 config 中的默认值
+    resume_path = args.resume if args.resume else config.RESUME_PATH
+    
+    if resume_path:
+        if os.path.isfile(resume_path):
+            logger.info(f"Loading checkpoint '{resume_path}'...")
+            checkpoint = torch.load(resume_path, map_location=device)
+            
+            # 恢复状态
+            start_epoch = checkpoint['epoch']
+            best_acc = checkpoint['best_acc']
+            net.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            
+            logger.info(f"Loaded checkpoint from epoch {start_epoch}, Best Acc: {best_acc:.2f}%")
+        else:
+            logger.warning(f"No checkpoint found at '{resume_path}'")
 
-    logger.info("Training Finished.")
+    # 6. 训练循环
+    logger.info(f"Start Training from epoch {start_epoch+1} to {config.EPOCHS}...")
+    
+    # 用于可视化的数据记录
+    log_data = {
+        'train_losses': [], 'val_losses': [],
+        'train_accs': [], 'val_accs': []
+    }
+    
+    try:
+        for epoch in range(start_epoch, config.EPOCHS):
+            start_time = time.time()
+            
+            train_loss, train_acc = train_one_epoch(net, trainloader, criterion, optimizer, device, epoch)
+            val_loss, val_acc = validate(net, valloader, criterion, device)
+            
+            scheduler.step()
+            
+            duration = time.time() - start_time
+            
+            # 记录数据
+            log_data['train_losses'].append(train_loss)
+            log_data['val_losses'].append(val_loss)
+            log_data['train_accs'].append(train_acc)
+            log_data['val_accs'].append(val_acc)
+            
+            log_msg = (f"Epoch [{epoch+1}/{config.EPOCHS}] "
+                       f"Time: {duration:.1f}s | "
+                       f"Train Loss: {train_loss:.4f} Acc: {train_acc:.2f}% | "
+                       f"Val Loss: {val_loss:.4f} Acc: {val_acc:.2f}% | "
+                       f"LR: {optimizer.param_groups[0]['lr']:.6f}")
+            logger.info(log_msg)
+            
+            # 保存 Checkpoint (包含恢复所需的所有信息)
+            checkpoint_state = {
+                'epoch': epoch + 1,
+                'model_state_dict': net.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_acc': best_acc
+            }
+            
+            # 保存最新的
+            latest_path = os.path.join(config.CHECKPOINT_DIR, 'latest_checkpoint.pth')
+            torch.save(checkpoint_state, latest_path)
+            
+            # 保存最佳模型
+            if val_acc > best_acc:
+                best_acc = val_acc
+                # 同时也更新最佳模型的 checkpoint 字典，以便可以从最佳点恢复
+                checkpoint_state['best_acc'] = best_acc 
+                save_path = os.path.join(config.CHECKPOINT_DIR, 'best_model.pth')
+                torch.save(checkpoint_state, save_path)
+                logger.info(f"Saved Best Model (Acc: {best_acc:.2f}%) to {save_path}")
+
+    except KeyboardInterrupt:
+        logger.info("Training interrupted by user.")
+        
+    finally:
+        # 7. 训练结束或中断时绘制曲线
+        logger.info("Plotting training curves...")
+        viz_path = os.path.join(config.VISUALIZATION_DIR, 'training_curves.png')
+        plot_training_curves(log_data, viz_path)
+        logger.info(f"Training curves saved to {viz_path}")
+        logger.info("Training Finished.")
 
 if __name__ == '__main__':
     main()
