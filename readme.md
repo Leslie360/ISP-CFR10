@@ -1,121 +1,125 @@
 ---
 
-# Organic Transistor Synapse Simulation & Accelerated Training Framework
+# Bio-inspired Organic Neuromorphic Vision System (ISP-CFR10)
 
-这是一个基于 PyTorch 的深度学习研究框架，旨在模拟 **有机光电晶体管 (Organic Optoelectronic Transistors)** 作为突触器件在神经网络中的行为。
+这是一个基于 PyTorch 的**仿生有机神经形态视觉系统**仿真框架。该项目旨在弥合传统的数字深度学习与新兴的**有机光电计算 (Organic Optoelectronic Computing)** 之间的鸿沟。
 
-本项目不仅实现了**材料物理特性的精确仿真**（如光谱响应、散粒噪声、LTP/LTD 非线性），还通过**高性能计算 (HPC)** 技术对训练管线进行了深度优化，实现了从“物理仿真”到“高速训练”的跨越。
-
----
-
-## 🚀 核心特性 (Key Features)
-
-### 1. 🔬 物理真实性仿真 (Physics-Aware Modeling)
-
-我们将有机半导体器件的物理约束直接嵌入到了数据流和神经网络层中，而非简单的数值计算。
-
-* **光电转换反演 (Inverse ISP & Physical Light)**:
-* **逆 Gamma 校正**: 将 sRGB 图像还原为线性物理光强。
-* **泊松散粒噪声 (Poisson Shot Noise)**: 模拟光子到达的离散统计特性，引入真实的输入端噪声 ()。
-* **光谱响应映射 (Spectral Responsivity)**: 根据有机材料对 R/G/B 不同波长的响应度差异（如绿光响应最强），对输入信号进行加权，模拟真实的载流子生成过程。
-
-
-* **有机突触卷积层 (Organic Synapse Layer)**:
-* **电导映射**: 将神经网络权重映射到真实的纳安级电流范围 ()。
-* **器件变异性 (Device Variability)**: 在前向传播中注入高斯噪声，模拟器件的 Cycle-to-cycle 变异。
-* **读出电路模拟 (Readout Emulation)**: 实现了模拟-数字信号的重归一化，防止微弱电流导致的梯度消失。
-
-
-
-### 2. ⚡ 训练稳定性优化 (Training Stability)
-
-针对物理噪声导致的梯度震荡问题，采用了多种策略确保收敛：
-
-* **硬件感知约束 (Hardware-Aware Constraints)**:
-* **Hard Clamping**: 在每次梯度更新后，强制将权重限制在物理定义的电导范围内，防止参数漂移。
-* **LTP/LTD 动力学**: (可选) 集成了基于实验数据的长时程增强/抑制非线性更新规则。
-
-
-* **学习率调度**:
-* 采用 `CosineAnnealingLR` 配合 `Warmup` 策略。
-* **Warmup**: 在训练初期使用较小学习率预热，适应物理噪声。
-* **Cosine Decay**: 后期平滑衰减，帮助模型收敛到平坦的极小值区域。
-
-
-
-### 3. 🏎️ 基础设施与加速 (Infrastructure Optimization)
-
-为了解决小模型在高端 GPU (RTX 5070 Ti) 上的利用率低 (GPU Starvation) 问题，我们实施了全栈加速：
-
-* **大规模并行 (Massive Batch Size)**:
-* 将 Batch Size 从 `128` 提升至 `2048`，大幅提升计算密度，掩盖 Kernel Launch 开销。
-* **Linear Scaling Rule**: 同步调整学习率 () 以匹配大 Batch 训练。
-
-
-* **混合精度训练 (Mixed Precision / AMP)**:
-* 启用 `torch.amp`，使用 **BFloat16 (BF16)** 数据类型。
-* 相比 FP16，BF16 拥有与 FP32 相同的动态范围，完美适配物理仿真中跨度极大的数值，同时减少显存占用并利用 Tensor Cores 加速。
-
-
-* **图模式编译 (JIT Compilation)**:
-* 使用 `torch.compile` (Inductor 后端) 对模型进行图层面的算子融合 (Operator Fusion)。
-* 消除了 Python 解释器的开销 (Overhead)，显著提升了自定义物理层 (`OrganicSynapseConv`) 的执行效率。
-
-
-* **数据加载优化**:
-* `pin_memory=True`: 锁页内存，加速 CPU 到 GPU 的数据传输。
-* `persistent_workers=True`: 避免每个 Epoch 重建数据加载进程。
-
-
+本项目构建了一个从“物理光子输入”到“物理并行计算”的全链路仿真环境，并提出了一套**硬件感知的训练算法 (Hardware-Aware Training)**，成功在具有高噪声、非线性的有机电化学晶体管 (OECT) 阵列上实现了 CIFAR-10 数据集的高精度分类 (**~87.3%**)，同时大幅降低了计算能耗。
 
 ---
 
-## 🛠️ 环境要求 (Requirements)
+## 🚀 核心创新 (Core Innovations)
 
-* Python 3.10+
-* PyTorch 2.0+ (必须支持 `torch.compile` 和 `amp`)
-* CUDA 11.8+ / 12.x
-* NVIDIA GPU (推荐 RTX 30/40/50 系列以支持 BF16)
-* **System Dependencies**: `build-essential`, `python3-dev` (用于 JIT 编译)
+### 1. 👁️ 物理感知输入流 (Physics-Aware Input Pipeline)
+
+传统的数字图像（sRGB）无法反映有机传感器面临的真实物理环境。我们构建了逆向 ISP 管道来恢复物理真相：
+
+* **光强反演 (Inverse Gamma)**: 将非线性的 sRGB 信号还原为线性的物理光子通量。
+* **光谱响应映射 (Spectral Responsivity)**: 模拟有机半导体材料（如 P3HT:PCBM）对不同波长（R/G/B）的非均匀光电响应特性。
+* **泊松散粒噪声 (Poisson Shot Noise)**: 引入符合物理统计规律的光子到达噪声 ()，模拟低光照条件下的真实传感器输出。
+
+### 2. 🧠 有机突触器件仿真 (Organic Synapse Simulation)
+
+我们在卷积层中精确建模了有机电化学晶体管 (OECT) 的物理行为，而非简单的数学乘法：
+
+* **电导映射**: 将神经网络权重映射到器件的物理电导范围 ()。
+* **非线性更新 (LTP/LTD)**: 基于真实的实验数据，模拟了器件在写入过程中的长时程增强 (LTP) 和抑制 (LTD) 的非线性动力学及不对称性。
+* **器件变异性 (Device Variability)**: 在前向传播中注入高斯噪声，模拟器件的 Cycle-to-Cycle (C2C) 读写噪声。
+
+### 3. 🛡️ 硬件感知训练算法 (Hardware-Aware Training)
+
+针对模拟器件“不精确”的特性，我们设计了鲁棒的训练策略，使神经网络具有“自愈”能力：
+
+* **混合动力梯度更新 (Residual Physics Update)**: 提出 -混合策略，结合数学梯度与物理非线性梯度，防止物理失真导致的训练发散。
+* **激进梯度钳制 (Aggressive Gradient Clipping)**: 引入 `max_norm=1.0` 的强力裁剪，防止物理噪声引发的梯度爆炸。
+* **硬件约束 (Hard Clamping)**: 在每次更新后强制将权重限制在物理电导的可行域内。
+
+### 4. ⚡ 高性能计算优化 (HPC Optimization)
+
+为了解决物理仿真带来的额外计算开销，我们对训练管线进行了深度优化：
+
+* **混合精度训练 (AMP - BF16)**: 利用 NVIDIA RTX 30/40/50 系列的 **BFloat16** Tensor Cores，在保证物理数值动态范围的同时加速计算。
+* **图模式编译 (Torch.compile)**: 使用 PyTorch 2.0 Inductor 后端，将自定义的物理算子融合 (Kernel Fusion)，大幅减少 Python Overhead。
+* **大规模并行**: 支持超大 Batch Size (2048)，充分利用显存带宽，显著提升吞吐量。
 
 ---
 
-## 📊 性能对比 (Performance)
+## 📊 性能表现 (Performance)
 
-| 配置 | Batch Size | Precision | Compiler | GPU Util | Training Speed |
-| --- | --- | --- | --- | --- | --- |
-| **Baseline** | 128 | FP32 | Eager | ~8% | Slow |
-| **Optimized** | 2048 | **BF16** | **Inductor** | **High** | **~10x Faster** |
+| Metric | Digital Baseline (FP32) | **Organic Neuromorphic (Ours)** |
+| --- | --- | --- |
+| **Accuracy (CIFAR-10)** | ~92% | **87.29%** |
+| **Bit Precision** | 32-bit Float | **Analog Conductance (Noisy)** |
+| **Update Linearity** | Perfect | **Non-linear (LTP/LTD)** |
+| **Noise Level** | None | **High (Shot + Device Noise)** |
+| **Training Speed** | 1.0x | **~1.5x (with Optimization)** |
+
+> **结果分析**: 尽管引入了严重的物理噪声和非理想特性，我们的硬件感知算法仍能将准确率保持在 87% 以上，证明了有机神经形态计算在边缘智能应用中的巨大潜力。
 
 ---
 
-## 🏃‍♂️ 运行指南 (Usage)
+## 🛠️ 环境依赖 (Requirements)
 
-### 1. 训练 (Training)
+* **Python**: 3.10+
+* **PyTorch**: 2.1+ (推荐 2.4+ 以获得最佳 `torch.compile` 支持)
+* **CUDA**: 12.1+
+* **GPU**: NVIDIA RTX 3060 或更高 (推荐支持 BF16 的显卡)
+* **System**: Linux (Ubuntu 22.04+) / WSL2 (推荐)
+
+安装依赖：
 
 ```bash
-# 从头开始训练
+pip install torch torchvision numpy matplotlib
+# 确保系统安装了 gcc 以支持 torch.compile
+sudo apt install build-essential python3-dev
+
+```
+
+---
+
+## 🏃‍♂️ 快速开始 (Quick Start)
+
+### 1. 训练模型
+
+使用默认配置（模拟真实物理环境 + 硬件感知训练）开始训练：
+
+```bash
 python train.py
 
-# 从断点继续训练 (Resume)
+```
+
+### 2. 从断点恢复
+
+如果训练中断，可以从最新的 Checkpoint 继续（自动重置学习率调度）：
+
+```bash
 python train.py --resume ./checkpoints/best_model.pth
 
 ```
 
-### 2. 配置 (Configuration)
+### 3. 配置物理参数
 
-所有物理参数和训练超参数均在 `config.py` 中定义：
+所有物理参数均在 `config.py` 中定义，可根据不同的有机材料特性进行修改：
 
 ```python
 # config.py
-BATCH_SIZE = 2048       # 加速关键
-MAX_PHOTONS = 10000     # 调节物理噪声水平 (越小噪声越大)
-RGB_RESPONSIVITY = ...  # 材料光谱特性
+BATCH_SIZE = 2048        # 针对 RTX 显卡优化
+MAX_PHOTONS = 10000      # 调整输入光强 (噪声水平)
+LTP_POLY = [...]         # 自定义器件的 LTP 拟合多项式
+DEVICE_NOISE_STD = ...   # 调整器件读写噪声
 
 ```
 
 ---
 
-## 📝 引用与致谢
+## 📂 项目结构 (Structure)
 
-本项目基于 CIFAR-10 数据集，结合了神经形态计算与高性能深度学习训练技术。代码结构参考了最新的 PyTorch 最佳实践。
+* `train.py`: 主训练脚本，包含硬件感知训练逻辑、AMP 混合精度和 Scheduler 管理。
+* `model.py`: 定义 ResNet-18 模型及核心的 **`OrganicSynapseConv`** 算子（物理卷积层）。
+* `dataset.py`: 自定义数据加载器，实现光强反演、光谱响应和泊松噪声注入。
+* `config.py`: 集中管理物理参数、训练超参数和硬件配置。
+* `ltp_ltd.txt`: 真实的有机电化学晶体管 (OECT) 实验数据，用于拟合非线性更新曲线。
+
+---
+
+*Created by [Qiao Sir], 2026.02
