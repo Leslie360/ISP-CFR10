@@ -141,6 +141,9 @@ def apply_ltp_ltd_nonlinearity(net):
                 
                 # 归一化斜率 (避免 1e-10 这种数值直接把梯度杀没了)
                 # 使用预先计算好的 max 值或动态 max
+                # 这里用预先计算好的 max 是因为实验数据是固定的，不会改变
+                # 动态 max 会在每次训练时重新计算，可能会引入不稳定因素
+                # 所以这里用预先计算好的 max 值
                 slope_ltp /= (slope_ltp.max() + 1e-8)
                 slope_ltd /= (slope_ltd.max() + 1e-8)
                 
@@ -209,7 +212,7 @@ def train_one_epoch(net, dataloader, criterion, optimizer, device, epoch, scaler
             for module in net.modules():
                 if isinstance(module, model.OrganicSynapseConv):
                      module.weight.data.clamp_(-1.0, 1.0)
-                     
+
         # ===========================================================
         
         # [新增] 6. 强制物理约束 (Hard Constraint)
