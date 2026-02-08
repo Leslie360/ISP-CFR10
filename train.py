@@ -118,59 +118,49 @@ def get_scheduler(optimizer, warmup_epochs, max_epochs):
     return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 def apply_ltp_ltd_nonlinearity(net):
-    """
-    修改版：不再强力缩放梯度，而是根据物理非线性给予微小的梯度“倾向性”。
-    或者为了排查问题，我们可以暂时让它变得非常温和。
-    """
-    # 如果想先跑通 90%，建议直接 return，先验证模型结构没问题
-    # return 
-    
-    # 如果必须加，请使用以下温和逻辑：
     ltp_poly = np.poly1d(config.LTP_POLY)
     ltd_poly = np.poly1d(config.LTD_POLY)
     
+    # 定义物理影响因子 (0.0 = 纯数字，1.0 = 纯物理)
+    # 0.3 是一个经验值，既体现物理特性，又保证绝对稳定
+    ALPHA = 0.3 
+
     for module in net.modules():
         if isinstance(module, model.OrganicSynapseConv):
             if module.weight.grad is not None:
-                # 获取当前权重状态 [-1, 1] -> [0, 1]
-                w_norm = (torch.clamp(module.weight.data, -1, 1) + 1.0) / 2.0
+                # 1. 【核心修复】计算斜率前，必须把权重 Clamp 到 [-1, 1]
+                # 防止权重飞出范围后，多项式算出一个巨大的错误值
+                w_safe = torch.clamp(module.weight.data, -1.0, 1.0)
                 
-                # 计算物理斜率 (绝对值)
-                # 注意：你的多项式拟合出的斜率非常小(1e-10级别)，不能直接乘！
-                # 我们需要的是“相对非线性形状”，而不是绝对数值。
+                # 归一化到 [0, 1] 用于计算多项式
+                w_norm = (w_safe + 1.0) / 2.0
                 
-                # 重新拟合或归一化斜率：
-                # 假设最快更新速度对应 slope = 1.0
-                # 你的原始数据里，最大变化量是 ~1e-10，这太小了。
-                # 必须把斜率归一化到 [0.5, 1.0] 这种范围，才不会杀对梯度。
-                
+                # 计算物理斜率
                 slope_ltp = np.abs(ltp_poly(w_norm.cpu().numpy()))
                 slope_ltd = np.abs(ltd_poly(w_norm.cpu().numpy()))
                 
-                # 归一化斜率 (关键步骤！！！)
-                # 找出斜率的最大值，把所有斜率除以它
-                # 这样最敏感的区域梯度保持不变，不敏感的区域梯度减小
+                # 归一化斜率 (避免 1e-10 这种数值直接把梯度杀没了)
+                # 使用预先计算好的 max 值或动态 max
                 slope_ltp /= (slope_ltp.max() + 1e-8)
                 slope_ltd /= (slope_ltd.max() + 1e-8)
                 
                 slope_ltp = torch.from_numpy(slope_ltp).to(module.weight.device).float()
                 slope_ltd = torch.from_numpy(slope_ltd).to(module.weight.device).float()
                 
-                # 混合系数 (0.5 + 0.5 * slope)
-                # 意思是：至少保留 50% 的梯度，另外 50% 由物理特性决定
-                # 这样既有物理意义，又不会让网络瘫痪
-                ltp_factor = 0.5 + 0.5 * slope_ltp
-                ltd_factor = 0.5 + 0.5 * slope_ltd
-                
-                # 根据梯度符号应用
+                # 2. 准备梯度掩码
                 grad = module.weight.grad
-                mask_ltp = (grad < 0).float() # weight要增加
-                mask_ltd = (grad > 0).float() # weight要减小
+                mask_ltp = (grad < 0).float()
+                mask_ltd = (grad > 0).float()
                 
-                factor = mask_ltp * ltp_factor + mask_ltd * ltd_factor
+                # 计算物理修正因子
+                poly_factor = mask_ltp * slope_ltp + mask_ltd * slope_ltd
                 
-                # 应用缩放
-                grad.mul_(factor)
+                # 3. 【残差更新】 
+                # New_Grad = Original_Grad * (1 - alpha) + (Original_Grad * Poly_Factor) * alpha
+                # 这样即使 Poly_Factor 算错了，至少还有 70% 的原始梯度救命
+                scaling = (1 - ALPHA) + (poly_factor * ALPHA)
+                
+                grad.mul_(scaling)
 
 def train_one_epoch(net, dataloader, criterion, optimizer, device, epoch, scaler):
     net.train()
@@ -209,10 +199,17 @@ def train_one_epoch(net, dataloader, criterion, optimizer, device, epoch, scaler
         apply_ltp_ltd_nonlinearity(net) 
         
         # 梯度裁剪 (可选，防止梯度爆炸)
-        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=2.0)
+        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
 
         scaler.step(optimizer)
         scaler.update()
+
+        # 【新增/检查】每次更新完立刻把权重按回 [-1, 1]
+        with torch.no_grad():
+            for module in net.modules():
+                if isinstance(module, model.OrganicSynapseConv):
+                     module.weight.data.clamp_(-1.0, 1.0)
+                     
         # ===========================================================
         
         # [新增] 6. 强制物理约束 (Hard Constraint)
